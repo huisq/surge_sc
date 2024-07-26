@@ -67,6 +67,8 @@ module surge::surge {
         // This parameter is updated when adding new transaction,
         // and is used in stale transaction pruning.
         //max_sequence_number: u64,
+        // psbt, use for getter function to track Transaction index
+        pending_psbts: vector<String>,
         // A map from transaction psbt to the Transaction information.
         // off-chain decode psbt to find index of Transaction
         pendings: BigVector<Transaction>,
@@ -234,6 +236,7 @@ module surge::surge {
         approvals: 1
         };
         table::add(&mut new_tx.signatures, public_key, true);
+        vector::push_back(&mut surge.txn_book.pendings)
         big_vector::push_back(&mut surge.txn_book.pendings,new_tx);
         event::emit(TransactionInitiatedEvent{
             initiator_address: owner_address,
@@ -307,6 +310,7 @@ module surge::surge {
         let txn = big_vector::borrow_mut(&mut surge.txn_book.pendings, index);
         // verify txid
         assert!(tx_result::is_executed(&txid), ETXID_NOT_CONFIRMED);
+        vector::swap_remove(surge.txn_book.pending_psbts, index);
         big_vector::swap_remove(&mut surge.txn_book.pendings, index);
     }
 
@@ -347,6 +351,7 @@ module surge::surge {
             txn_book: TxnBook {
                 // min_sequence_number: init_sequence_number,
                 // max_sequence_number: init_sequence_number,
+                pending_psbts: vector::empty(),
                 pendings: big_vector::empty(BIG_BUCKET_SIZE),
             },
         });
@@ -384,4 +389,9 @@ module surge::surge {
         let surge = borrow_global_mut<SurgeWallet>(msig_address);
         surge.info.owners
     }
+
+    public fun get_transactions(msig_address: address): vector<String>{ //vector<first psbt>
+        let surge = borrow_global_mut<SurgeWallet>(msig_address);
+        surge.txn_book.pending_psbts
+    } 
 }
