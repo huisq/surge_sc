@@ -1,15 +1,17 @@
 module surge::user {
+    friend surge::surge;
     use moveos_std::event;
     use std::vector;
     use moveos_std::signer;
-
-    //==============================================================================================
-    // Errors
-    //==============================================================================================
+    use moveos_std::big_vector::{Self,BigVector};
 
     /// This module keeps track of the msig addresses owned by an owner address.
     /// The data is published under each address's resource.
     ///
+
+    //==============================================================================================
+    // Errors
+    //==============================================================================================
 
     /// Error code for duplicate address registration.
     const EADDRESS_ALREADY_REGISTERED: u64 = 1;
@@ -22,17 +24,8 @@ module surge::user {
     /// registered previously.
     const EMSIG_NOT_REGISTERED: u64 = 3;
 
-    /// Error code for user has rotated their public key. In the current
-    /// implementation, since the key rotation interface in Aptos account.move
-    /// is not finalized, client side key rotation is not supported.
-    ///
-    /// The key rotation feature (multi-sig wallet permission change & multi-sig
-    /// wallet key rotation according to single wallet key rotation) will be
-    /// supported shortly.
-    const EPUBLIC_KEY_ROTATED: u64 = 4;
-
     /// Error code for msig already exist
-    const EMISG_ALREADY_EXIST: u64 = 5;
+    const EMISG_ALREADY_EXIST: u64 = 4;
 
     //==============================================================================================
     // Constants
@@ -41,6 +34,7 @@ module surge::user {
     const OP_MSIG_INIT: u8 = 1;
     const OP_MSIG_PENDING: u8 = 2;
     const OP_MSIG_CONFIRM: u8 = 3;
+    const BIG_BUCKET_SIZE: u64 = 20; //tbc
 
     //==============================================================================================
     // Structs
@@ -57,20 +51,18 @@ module surge::user {
     ///             registered.
     struct OwnerMsigs has key {
         public_key: vector<u8>,
-        // we use TableMap, beacuse anyone can add a new msig into others pending list.
+        // we use BigVector, beacuse anyone can add a new msig into others pending list.
         // if we use vector<address> here, it may have performance issues.
-        // the `bool` just used to hold the Value position of table, it is always true.
-        pendings: TableMap<address, bool>, 
-        //anne: TableMap is forked from Apto's table_with_length, which is a iteratable table with more efficient storage than vector for large scale
-        //need to discuss alternative on Rooch
-        owned_msigs: TableMap<address, bool>,
+        pendings: BigVector<address>, 
+        //anne: in future need to use table_with_length, which is not available on Rooch yet
+        owned_msigs: BigVector<address>,
     }
 
     //==============================================================================================
     // Events
     //==============================================================================================
 
-    struct OwnerMigsChangeEvent has store, drop {
+    struct OwnerMigsChangeEvent has copy, drop {
         public_key: vector<u8>,
         msig: address,
         op_type: u8,
@@ -97,8 +89,6 @@ module surge::user {
     ///
     /// # Aborts
     /// * `EADDRESS_ALREADY_REGISTERED`: User has registered before;
-    /// * `EPUBLIC_KEY_ROTATED`: The input public key does not match the auth
-    ///         key in `account.move`.
     public entry fun register( 
         s: &signer,
         public_key: vector<u8>,
@@ -108,14 +98,13 @@ module surge::user {
         // Check whether user has registered before.
         assert!(!is_registered(signer_address), EADDRESS_ALREADY_REGISTERED);
 
-        // Check whether the input public key matches user's authentication key.
-        assert!(verify_public_key(signer_address, public_key), EPUBLIC_KEY_ROTATED); //anne: not sure if rooch can do this
+        // In future need to verify public key with auth key
 
         // Construct OwnerMsigs and write to account resource
         let msigs = OwnerMsigs {
             public_key,
-            pendings: table_map::create(),
-            owned_msigs: table_map::create()
+            pendings: big_vector::empty(BIG_BUCKET_SIZE),
+            owned_msigs: big_vector::empty(BIG_BUCKET_SIZE)
         };
         move_to(s, msigs);
 
@@ -147,7 +136,6 @@ module surge::user {
     /// # Emits
     /// * `RegisterEvent` if the msig_addr is added in owner resource.
     public(friend) fun register_msig(
-        //msig: &signer, //anne: add this back if friend visibility not available
         owners: &vector<address>,
         msig_addr: address,
     ) {
@@ -180,11 +168,11 @@ module surge::user {
         // Get the OwnerMsigs from account resource
         assert!(exists<OwnerMsigs>(owner), EADDRESS_NOT_REGISTRERED);
         let owner_msig = borrow_global_mut<OwnerMsigs>(owner);
-        assert!(!table_map::contains_key(&owner_msig.msigs, &msig), EMISG_ALREADY_EXIST);
+        assert!(!big_vector::contains<OwnerMsigs>(&owner_msig.msigs, &msig), EMISG_ALREADY_EXIST);
         let pendings = &mut owner_msig.pendings;
         // If the msig address is not registered in pendings, add to pendings
         // and emit the event.
-        table_map::add(pendings, msig, true);
+        big_vector::push_back(pendings, msig);
         emit_register_event(owner, msig, OP_MSIG_PENDING);
     }
 
@@ -202,9 +190,10 @@ module surge::user {
         msig: address,
     ) {
         assert!(exists<OwnerMsigs>(owner), EADDRESS_NOT_REGISTRERED);
-        let pendings = &mut borrow_global_mut<OwnerMsigs>(owner).pendings;
-        assert!(table_map::contains_key(pendings, &msig), EMSIG_NOT_REGISTERED);
-        table_map::remove(pendings, &msig);
+        let pendings = borrow_global_mut<OwnerMsigs>(owner).pendings;
+        assert!(big_vector::contains(&pendings, &msig), EMSIG_NOT_REGISTERED);
+        let (_, index) = big_vector::index_of(&pendings, &msig);
+        big_vector::swap_remove(&mut pendings, index);
         add_confirmed_msigs(owner, msig);
     }
 
@@ -227,9 +216,9 @@ module surge::user {
         // Get the OwnerMsigs from the account resource
         assert!(exists<OwnerMsigs>(owner), EADDRESS_NOT_REGISTRERED);
         let owned_msigs = &mut borrow_global_mut<OwnerMsigs>(owner).owned_msigs;
-        assert!(!table_map::contains_key(owned_msigs, &msig), EMISG_ALREADY_EXIST);
+        assert!(!big_vector::contains<OwnerMsigs>(&owned_msigs, &msig), EMISG_ALREADY_EXIST);
         // If msig is not previously registered, add it to account owned msigs.
-        table_map::add(owned_msigs, msig, true);
+        big_vector::push_back(owned_msigs, msig);
         emit_register_event(owner, msig, OP_MSIG_CONFIRM);
     }
 
@@ -253,10 +242,15 @@ module surge::user {
                 public_key: owner_msig.public_key,
                 msig,
                 op_type,
-                pendings_length: table_map::length(&owner_msig.pendings),
-                msigs_length: table_map::length(&owner_msig.msigs),
+                pendings_length: big_vector::length<address>(&owner_msig.pendings),
+                owned_msigs_length: big_vector::length<address>(&owner_msig.owned_msigs),
             }
         )
+    }
+
+    public(friend) fun verify_public_key(owner_address: address, public_key: vector<u8>): bool {
+        let owner_msig = borrow_global<OwnerMsigs>(owner_address);
+        owner_msig.public_key == public_key
     }
 
     /// Return whether the account address has previously been registered within
@@ -277,5 +271,8 @@ module surge::user {
     // Getter functions
     //==============================================================================================
     
-
+    public fun get_owned_msigs(owner_address: address): vector<address>{
+        let owned_msigs = borrow_global<OwnerMsigs>(owner_address).owned_msigs;
+        big_vector::to_vector(&owned_msigs)
+    }
 }
